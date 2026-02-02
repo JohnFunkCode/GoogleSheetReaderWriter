@@ -1,60 +1,40 @@
 #To continue this session, run codex resume 019c17a2-5330-7af3-9665-a394a4e2d45e
 
-# Google Sheet Reader Writer -- Full Technical Handoff
+# Google Sheet Reader Writer -- Full Technical Handoff (Updated)
 
 ## Project Overview
 
-This project is a Python CLI tool designed to support karate tournament
-organizers by:
+Python CLI/tooling to help karate tournament organizers:
 
-1.  Creating a Google Sheet from a CSV file.
-2.  Protecting all columns except the last two (`Judge Assigned`,
-    `Comments`).
-3.  Sharing the sheet with configured users.
-4.  Exporting a Google Sheet back to CSV.
+1. Create or update a shared Google Sheet from a CSV.
+2. Protect all columns except the last two (`Judge Assigned`, `Comments`).
+3. Share the sheet with configured users.
+4. Export a Google Sheet back to CSV.
 
-The system is built using: - Python - pandas - Google Sheets API -
-Google Drive API - Python Fire (CLI) - Google authentication libraries
+Tech: Python, pandas, Google Sheets API, Google Drive API, Python Fire, Google auth libs.
 
 ------------------------------------------------------------------------
 
-# Final Architecture Decision
+# Current Architecture & Auth
 
-The system supports three authentication modes:
+## Auth modes supported
+- `service_account`
+- `oauth`
+- `adc`
 
--   `service_account`
--   `oauth`
--   `adc` (Application Default Credentials)
+### Current intended mode for non-technical users
+**OAuth (Desktop App)** with one-time browser consent. No gcloud required.
 
-### Final Working Mode: `auth_mode: "adc"`
+Rationale for making OAuth the default:
+- ADC requires gcloud install and a CLI login, which is too much friction for non-technical users.
+- Service accounts are unreliable for personal Gmail Drive (quota/ownership limitations).
+- OAuth provides a one-time browser consent and then silent refresh, which is easiest to package.
 
-ADC was selected because:
-
--   Personal Gmail accounts cannot use Shared Drives.
--   Service accounts have no usable Drive storage in personal Gmail
-    contexts.
--   OAuth required `client_secret.json`, which added unnecessary
-    friction.
--   ADC uses the local user's Google identity and Drive quota.
-
-This removed the need for: - `client_secret.json` - Service account
-Drive ownership complexity
-
-------------------------------------------------------------------------
-
-# Authentication Setup (ADC)
-
-### One-time setup:
-
-    gcloud auth application-default login   --scopes="https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive"
-
-### Runtime behavior (sheets_client.py):
-
-    creds, project_id = google.auth.default(scopes=SCOPES)
-    sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
-    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-No client secret file required.
+Key behavior:
+- If OAuth paths are omitted in config, defaults are inferred:
+  - Client secret: `credentials.json` or `client_secret.json` next to `config.yaml`
+  - Token: OS-specific user config dir (`gsheet-rw/token.json`) unless overridden
+- First run shows a message and opens browser for consent.
 
 ------------------------------------------------------------------------
 
@@ -68,243 +48,164 @@ Run:
 
     python -m gsheet_rw.cli
 
-## Command 1: create_from_csv
+Commands:
 
-Arguments: - `csv_path` - `sheet_title` - `config_path` - Optional: -
-`worksheet_title` - `share_role` (default: writer) -
-`unprotected_last_n` (default: 2)
+## create_from_csv
+Args:
+- `csv_path`
+- `sheet_title`
+- `config_path`
+- `worksheet_title`
+- `drive_folder_name` (required if not in config)
+- `share_role` (default: writer)
+- `unprotected_last_n` (default: 2)
 
-### Behavior
+Behavior (current):
+1. Load config.
+2. Read CSV into DataFrame.
+3. Validate required columns.
+4. Resolve Drive folder **by name** (or `"root"` for My Drive root).
+5. Use `sheet_registry.yaml` to decide whether to reuse an existing sheet ID.
+6. If existing: create a **new timestamp tab** in the existing file.
+7. If new: create a new sheet, rename its first tab to a timestamp.
+8. Write data, auto-resize columns, then apply styling and protection.
+9. Move the new timestamp tab to **leftmost** position.
+10. Share file with configured users.
 
-1.  Load config.
-2.  Read CSV into pandas DataFrame.
-3.  Validate required columns.
-4.  Create spreadsheet.
-5.  Write DataFrame to sheet.
-6.  Protect all columns except last two.
-7.  Share with configured emails.
-8.  Return spreadsheet ID.
+Prints either `Created spreadsheet: <id>` or `Updated spreadsheet: <id>`.
 
-------------------------------------------------------------------------
+## export_to_csv
+Args:
+- `spreadsheet_id`
+- `csv_path` (or `out_csv_path`)
+- `config_path`
+- `worksheet_title`
 
-## Command 2: export_to_csv
-
-Arguments: - `spreadsheet_id` - `out_csv_path` - `config_path` -
-Optional: `worksheet_title`
-
-### Behavior
-
-1.  Load config.
-2.  Read sheet into DataFrame.
-3.  Normalize column structure.
-4.  Save to CSV.
+Behavior:
+1. Load config.
+2. Read from provided worksheet title or the **latest timestamp tab**.
+3. Normalize expected column ordering.
+4. Save to CSV.
 
 ------------------------------------------------------------------------
 
 # Required CSV Schema
 
 Expected columns:
-
--   Division
-
--   Rank
-
--   Age
-
--   Last Name
-
--   Ring \#
-
--   Competitor Count
-
--   Judge Assigned
-
--   Comments
+- Division
+- Rank
+- Age
+- Last Name
+- Ring #
+- Competitor Count
+- Judge Assigned
+- Comments
 
 Validation fails if any column is missing.
 
 ------------------------------------------------------------------------
 
-# Sheet Protection Logic
+# Sheet Tabs & Versioning
 
-All columns except the last two are protected using the Sheets API.
-
-Default behavior: - Protect columns 0 → total_columns - 2 - Only
-`owner_email` may edit protected columns
-
-------------------------------------------------------------------------
-
-# Sharing Logic
-
-Uses Drive API permissions:
-
--   Role default: writer
--   Sends notification email
--   Supports shared drives via `supportsAllDrives=True`
+- Every update writes data to a **new tab** named with a timestamp:
+  `YYYY-MM-DD HH:MM:SS`.
+- Newest tab is moved to the **leftmost** position.
+- Worksheet title is required on create (first tab), but it is renamed immediately.
 
 ------------------------------------------------------------------------
 
-# Spreadsheet Creation Logic
+# Registry (Avoiding Duplicate Sheets)
 
-If `drive_folder_id` provided: - Create via Drive API `files.create` -
-MIME type: `application/vnd.google-apps.spreadsheet` - Parent folder
-assigned - Rename default sheet if necessary
+A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 
-If not: - Create via Sheets API directly
-
-------------------------------------------------------------------------
-
-# Final config.yaml (Working Version)
-
-``` yaml
-auth_mode: "adc"
-
-owner_email: "owner@example.com"
-share_emails:
-  - "helper@example.com"
-
-drive_folder_id: null
-worksheet_title: "Sheet1"
-```
+- File: `sheet_registry.yaml` (stored next to `config.yaml`)
+- Keyed by **folder name** + **sheet title**
+- If ID no longer exists, a new sheet is created and registry updated.
 
 ------------------------------------------------------------------------
 
-# Issues Encountered and Resolved
+# Other significant decisions
 
-## 1. 403 SERVICE_DISABLED
-
-Cause: APIs not enabled\
-Fix: Enabled Sheets and Drive APIs.
-
-## 2. 403 Permission Denied (Service Account)
-
-Cause: Service account lacked Drive context\
-Fix: Switched creation to Drive API and eventually abandoned service
-account for personal Gmail.
-
-## 3. 404 Folder Not Found
-
-Cause: Folder name used instead of ID\
-Fix: Use actual Drive folder ID.
-
-## 4. 403 storageQuotaExceeded
-
-Cause: Service account has no Drive quota in personal Gmail\
-Fix: Switch to ADC mode.
-
-## 5. FileNotFoundError for client_secret.json
-
-Cause: Config defaulted to OAuth\
-Fix: Added support for `auth_mode: "adc"` and updated config validation.
-
-## 6. PyCharm Auto-Apply Corruption
-
-Cause: Bad patch injection\
-Fix: Replaced modules with clean full versions manually.
+- **Folder identification uses human-readable folder name** (not ID). It is required on create and can be provided via CLI or config; `"root"` targets My Drive root.
+- **In-place updates** were chosen to preserve sharing; new data goes into a timestamp-named tab rather than creating a new file.
+- **Newest tab ordering**: each new timestamp tab is moved to the leftmost position for visibility.
+- **Secrets handling**: OAuth credentials and token moved into `./secrets/`, which is gitignored.
+- **Column header change**: `# Comp` renamed to `Competitor Count` across CSVs and code.
+- **UI-agnostic refactor**: core logic moved into `gsheet_rw/app.py` with a public API surface for future Flask/Tkinter UIs.
 
 ------------------------------------------------------------------------
 
-# Current System State
+# Styling & Protection
 
-System is stable and working with:
+## Protection
+- All columns except the last `n` are protected (default: 2).
+- Only `owner_email` can edit protected columns.
 
--   Personal Gmail
--   ADC authentication
--   Proper sheet creation
--   Column protection logic
--   Sharing logic
--   CSV export
--   No client_secret.json required
--   No service account required
+## Styling
+- Alternating row fills:
+  - Protected columns: light grey (`#d9d9d9`) and dark grey (`#b7b7b7`)
+  - Unprotected columns: light blue (`#cfe2f3`) and light blue (`#9fc5e8`)
+- Thick horizontal borders between rows; **no vertical borders**.
+- Time rows (if first column looks like `9:00 a.m.`, `4:15 pm`, `12:00 noon`, `noon`):
+  - Row fill set to white
+  - Font size set to 18
+
+## Column width
+- Auto-resize all columns to fit data.
+- Then widen:
+  - `Judge Assigned`: 2× current width
+  - `Comments`: 4× current width
 
 ------------------------------------------------------------------------
 
-# Open Enhancements (Optional Future Work)
+# Files / Modules
 
-1.  Add dry-run mode
-2.  Add idempotent update mode (update existing sheet instead of always
-    creating)
-3.  Add integration tests
-4.  Replace print statements with structured logging
-5.  Print loaded config path at startup
-6.  Validate required OAuth scopes at runtime
-7.  Package as installable CLI tool
+- `gsheet_rw/app.py`: Core app logic (used by CLI, reusable for Flask/Tkinter)
+- `gsheet_rw/cli.py`: Thin CLI wrapper
+- `gsheet_rw/sheets_client.py`: Google Sheets/Drive API operations
+- `gsheet_rw/config.py`: Config parsing + OAuth defaults
+- `gsheet_rw/registry.py`: Registry file helpers
+- `gsheet_rw/__init__.py`: Public API surface (`create_from_csv`, `export_to_csv`)
+
+------------------------------------------------------------------------
+
+# Secrets & Paths
+
+- Credentials moved to `./secrets/`
+- `secrets/` added to `.gitignore`
+- `config.yaml` updated to point at `./secrets/credentials.json` and `./secrets/token.json`
+
+------------------------------------------------------------------------
+
+# Current config.example.yaml
+
+- Uses OAuth by default
+- Requires `drive_folder_name` (use `"root"` for My Drive root)
+- Requires `worksheet_title` on create
+
+------------------------------------------------------------------------
+
+# Notes / Caveats
+
+- Drive folder lookup is by **human-readable name** and errors if duplicates are found.
+- Folder lookup will raise a PermissionError on 403 (expected in restricted scopes).
+- Network/auth operations must run outside sandbox.
+
+------------------------------------------------------------------------
+
+# Latest Session Notes (2026-02-01 to 2026-02-02)
+
+- Project directory renamed to `GoogleSheetReaderWriter` and checked into GitHub.
+- OAuth is now the default recommended path for non-technical users.
+- Registry-based reuse prevents duplicate files with the same name.
+- Each update creates a timestamped tab; newest tab is leftmost.
+- Styling updated with alternating fills, borders, time-row overrides.
+- Column headers updated: `# Comp` -> `Competitor Count`.
+- `gsheet_rw` refactored so UI-agnostic logic lives in `app.py`.
 
 ------------------------------------------------------------------------
 
 # Deployment Model
 
-Local CLI tool executed from developer workstation.
-
+Local CLI tool executed from developer workstation or packaged UI.
 No server deployment required.
-
-------------------------------------------------------------------------
-
-# Final Recommendation
-
-For personal Gmail usage: continue using `auth_mode: "adc"`.
-
-For organizational continuity or team-owned storage: migrate to Google
-Workspace and Shared Drive with service account support retained.
-
-------------------------------------------------------------------------
-
-# Latest Session Notes (2026-02-01)
-
-- Attempted to run `create_from_csv` inside the Codex sandbox, but it
-  failed because outbound DNS/network access is blocked (could not
-  reach `oauth2.googleapis.com` for ADC token refresh).
-- Ran the command locally instead and it succeeded.
-- Created spreadsheet ID:
-  `1sU34hwTHuV39hq7odK6yfpqd1YH1OdctOLAjcGHECiE`.
-- Conclusion: any auth-dependent operations must be run outside the
-  sandbox in a network-enabled environment.
-
-------------------------------------------------------------------------
-
-# Latest Session Notes (2026-02-01) — OAuth packaging for non-technical user
-
-## Goal
-Make OAuth the easiest path for a non-technical user to update a single sheet owned by the developer, without gcloud/ADC.
-
-## Decisions
-- Chosen auth flow for this user: **OAuth (Desktop App)** with one-time browser consent.
-- Service account rejected due to personal Gmail limitations.
-- ADC rejected because the user cannot install/manage gcloud.
-
-## Code changes
-1) **OAuth default paths (zero-config friendly)**
-   - If `auth_mode: "oauth"` and paths are omitted, defaults resolve automatically.
-   - OAuth client secret default: look for `credentials.json` or `client_secret.json` next to `config.yaml`.
-   - OAuth token default: OS-specific user config dir (`gsheet-rw/token.json`).
-   - Implemented in `gsheet_rw/config.py`.
-
-2) **OAuth missing credentials error**
-   - Clear error if OAuth client JSON is not found, with guidance.
-   - Implemented in `gsheet_rw/sheets_client.py`.
-
-3) **First-run CLI message**
-   - When OAuth consent is needed, prints:
-     - First run: browser window will open for consent (one-time).
-     - Re-authorization: browser window will open to re-authorize.
-   - Implemented in `gsheet_rw/sheets_client.py`.
-
-4) **Example config + README updated**
-   - `config.example.yaml` switched to OAuth and shows defaults.
-   - README updated to document default OAuth token locations.
-
-## Files touched
-- `gsheet_rw/config.py`
-- `gsheet_rw/sheets_client.py`
-- `config.example.yaml`
-- `README.md`
-
-## Current packaging guidance (for the non-technical user)
-- Ship `config.yaml` + `credentials.json` together.
-- Set `auth_mode: "oauth"` in config.
-- Run the CLI once to complete browser consent; tokens stored locally in the default location.
-
-## Next potential steps
-- Add branded/clearer first-run message text if desired.
-- Build a Tkinter helper for consent (user deferred for later).
-- Prepare a simple installer/bundle (optional).
