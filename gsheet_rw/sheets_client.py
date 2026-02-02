@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 import google.auth
 import pandas as pd
@@ -27,10 +28,17 @@ class GoogleClients:
     drive: Any
 
 
+class GoogleClientsProtocol(Protocol):
+    sheets: Any
+    drive: Any
+
+
 def build_clients(service_account_json_path: str) -> GoogleClients:
     """Service-account only (legacy entrypoint)."""
     creds = ServiceAccountCredentials.from_service_account_file(service_account_json_path, scopes=SCOPES)
-    print("Auth mode: service_account | Principal:", creds.service_account_email)
+    logging.getLogger(__name__).info(
+        "auth_mode=service_account principal=%s", creds.service_account_email
+    )
     sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
     drive = build("drive", "v3", credentials=creds, cache_discovery=False)
     return GoogleClients(sheets=sheets, drive=drive)
@@ -47,7 +55,9 @@ def build_clients_from_config(cfg: AppConfig) -> GoogleClients:
 
     if mode == "adc":
         creds, project_id = google.auth.default(scopes=SCOPES)
-        print("Auth mode: adc | Project:", project_id or "(unknown)")
+        logging.getLogger(__name__).info(
+            "auth_mode=adc project=%s", project_id or "(unknown)"
+        )
         sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
         drive = build("drive", "v3", credentials=creds, cache_discovery=False)
         return GoogleClients(sheets=sheets, drive=drive)
@@ -61,7 +71,7 @@ def build_clients_from_config(cfg: AppConfig) -> GoogleClients:
     if not cfg.oauth_client_secret_json.exists():
         raise FileNotFoundError(
             "OAuth client secret JSON not found. "
-            "Provide oauth_client_secret_json in config.yaml or place credentials.json next to the config file."
+            "Provide oauth_client_secret_json in config/config.yaml or place credentials.json next to the config file."
         )
 
     token_path = Path(cfg.oauth_token_path).expanduser().resolve()
@@ -74,16 +84,17 @@ def build_clients_from_config(cfg: AppConfig) -> GoogleClients:
         creds.refresh(Request())
 
     if not creds or not creds.valid:
+        logger = logging.getLogger(__name__)
         if token_path.exists():
-            print("Authorization required: a browser window will open to re-authorize.")
+            logger.info("oauth_reauth_required=true message=\"browser window will open\"")
         else:
-            print("First run: a browser window will open for Google consent. You only need to do this once.")
+            logger.info("oauth_first_run=true message=\"browser window will open\"")
         flow = InstalledAppFlow.from_client_secrets_file(str(cfg.oauth_client_secret_json), SCOPES)
         creds = flow.run_local_server(port=0)
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(creds.to_json(), encoding="utf-8")
 
-    print("Auth mode: oauth | Principal: local user token")
+    logging.getLogger(__name__).info("auth_mode=oauth principal=local_user_token")
     sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
     drive = build("drive", "v3", credentials=creds, cache_discovery=False)
     return GoogleClients(sheets=sheets, drive=drive)
@@ -108,9 +119,12 @@ def create_spreadsheet(
                 supportsAllDrives=True,
             ).execute()
         except HttpError as e:
-            print("Drive create HTTP status:", e.resp.status)
-            print("Drive create HTTP reason:", getattr(e.resp, "reason", None))
-            print("Drive create HTTP content:", e.content.decode("utf-8", errors="replace"))
+            logging.getLogger(__name__).error(
+                "event=drive_create_error status=%s reason=%s content=%s",
+                e.resp.status,
+                getattr(e.resp, "reason", None),
+                e.content.decode("utf-8", errors="replace"),
+            )
             raise
 
         spreadsheet_id = created["id"]
@@ -151,9 +165,12 @@ def create_spreadsheet(
             fields="spreadsheetId,sheets(properties(sheetId))",
         ).execute()
     except HttpError as e:
-        print("Sheets create HTTP status:", e.resp.status)
-        print("Sheets create HTTP reason:", getattr(e.resp, "reason", None))
-        print("Sheets create HTTP content:", e.content.decode("utf-8", errors="replace"))
+        logging.getLogger(__name__).error(
+            "event=sheets_create_error status=%s reason=%s content=%s",
+            e.resp.status,
+            getattr(e.resp, "reason", None),
+            e.content.decode("utf-8", errors="replace"),
+        )
         raise
 
     spreadsheet_id = spreadsheet["spreadsheetId"]
@@ -554,6 +571,7 @@ def share_spreadsheet(
     emails: Sequence[str],
     role: str = "writer",
 ) -> None:
+    logger = logging.getLogger(__name__)
     for email in emails:
         perm_body = {"type": "user", "role": role, "emailAddress": email}
         clients.drive.permissions().create(
@@ -563,6 +581,12 @@ def share_spreadsheet(
             fields="id",
             supportsAllDrives=True,
         ).execute()
+        logger.info(
+            "event=share_permission spreadsheet_id=%s role=%s email=%s",
+            spreadsheet_id,
+            role,
+            email,
+        )
 
 
 def read_sheet_to_dataframe(

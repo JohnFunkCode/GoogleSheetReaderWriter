@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from pathlib import Path
 import re
 from typing import Optional
@@ -25,6 +26,7 @@ from .sheets_client import (
     share_spreadsheet,
     spreadsheet_exists,
     write_dataframe,
+    GoogleClientsProtocol,
 )
 
 EXPECTED_COLUMNS = [
@@ -42,31 +44,62 @@ EXPECTED_COLUMNS = [
 def create_from_csv(
     csv_path: str,
     sheet_title: Optional[str] = None,
-    config_path: str = "config.yaml",
+    config_path: str = "config/config.yaml",
+    config: Optional[AppConfig] = None,
+    clients: Optional[GoogleClientsProtocol] = None,
     worksheet_title: Optional[str] = None,
     drive_folder_name: Optional[str] = None,
     share_role: str = "writer",
     unprotected_last_n: int = 2,
 ) -> str:
-    cfg = AppConfig.load(config_path)
+    """Create or update a spreadsheet from a CSV file.
+
+    Uses a registry to reuse an existing sheet when possible, then writes data
+    to a new timestamp-named tab. This preserves sharing links while keeping a
+    short history of updates.
+
+    Args:
+        csv_path: Path to the source CSV file.
+        sheet_title: Spreadsheet title in Drive. Overrides config value.
+        config_path: Path to config file if `config` is not provided.
+        config: Optional in-memory AppConfig (bypasses config_path).
+        clients: Optional pre-built Sheets/Drive client bundle (for tests).
+        worksheet_title: Required on create; initial tab title (renamed immediately).
+        drive_folder_name: Drive folder name or "root" (overrides config value).
+        share_role: Drive permission role for share_emails (default: writer).
+        unprotected_last_n: Number of trailing columns to leave unprotected.
+
+    Returns:
+        The spreadsheet ID of the created or updated file.
+
+    Raises:
+        ValueError: If required config fields are missing or CSV columns are invalid.
+        FileNotFoundError: If OAuth client secrets are missing for oauth mode.
+        PermissionError: If Drive access is denied for folder lookup.
+        googleapiclient.errors.HttpError: For other Sheets/Drive API errors.
+    """
+    cfg = config or AppConfig.load(config_path)
     ws_title = worksheet_title or cfg.worksheet_title
     spreadsheet_title = sheet_title or cfg.spreadsheet_title
     folder_name = drive_folder_name or cfg.drive_folder_name
 
     if not folder_name:
-        raise ValueError("Missing drive folder name. Provide drive_folder_name or set it in config.yaml.")
+        raise ValueError("Missing drive folder name. Provide drive_folder_name or set it in config/config.yaml.")
 
     if not spreadsheet_title:
-        raise ValueError("Missing spreadsheet title. Provide sheet_title or set spreadsheet_title in config.yaml.")
+        raise ValueError("Missing spreadsheet title. Provide sheet_title or set spreadsheet_title in config/config.yaml.")
 
     if not ws_title:
-        raise ValueError("Missing worksheet title. Provide worksheet_title or set worksheet_title in config.yaml.")
+        raise ValueError("Missing worksheet title. Provide worksheet_title or set worksheet_title in config/config.yaml.")
 
     df = pd.read_csv(csv_path)
     _validate_columns(df)
 
-    clients = build_clients_from_config(cfg)
-    registry_path = Path(config_path).expanduser().resolve().parent / "sheet_registry.yaml"
+    if clients is None:
+        clients = build_clients_from_config(cfg)
+    registry_path = (
+        Path(config_path).expanduser().resolve().parent.parent / "data" / "sheet_registry.yaml"
+    )
     registry = load_registry(registry_path)
 
     registry_key = folder_name
@@ -99,6 +132,12 @@ def create_from_csv(
         set_registered_id(registry, registry_key, spreadsheet_title, spreadsheet_id)
         save_registry(registry_path, registry)
         created_new = True
+        logging.getLogger(__name__).info(
+            "event=spreadsheet_created spreadsheet_id=%s title=%s folder_name=%s",
+            spreadsheet_id,
+            spreadsheet_title,
+            folder_name,
+        )
 
     write_dataframe(clients, spreadsheet_id, timestamp_title, df)
     auto_resize_columns(
@@ -132,18 +171,44 @@ def create_from_csv(
     )
     share_spreadsheet(clients, spreadsheet_id, cfg.share_emails, role=share_role)
 
-    action = "Created" if created_new else "Updated"
-    print(f"{action} spreadsheet: {spreadsheet_id}")
+    logging.getLogger(__name__).info(
+        "event=spreadsheet_updated spreadsheet_id=%s tab=%s created_new=%s",
+        spreadsheet_id,
+        timestamp_title,
+        created_new,
+    )
     return spreadsheet_id
 
 
 def export_to_csv(
     spreadsheet_id: str,
     csv_path: Optional[str] = None,
-    config_path: str = "config.yaml",
+    config_path: str = "config/config.yaml",
+    config: Optional[AppConfig] = None,
+    clients: Optional[GoogleClientsProtocol] = None,
     worksheet_title: Optional[str] = None,
     out_csv_path: Optional[str] = None,
 ) -> str:
+    """Export a worksheet to CSV.
+
+    If worksheet_title is omitted, the most recent timestamp-named tab is used.
+
+    Args:
+        spreadsheet_id: Target spreadsheet ID.
+        csv_path: Output CSV path (preferred).
+        config_path: Path to config file if `config` is not provided.
+        config: Optional in-memory AppConfig (bypasses config_path).
+        clients: Optional pre-built Sheets/Drive client bundle (for tests).
+        worksheet_title: Worksheet title to export (defaults to latest timestamp tab).
+        out_csv_path: Deprecated alias for csv_path.
+
+    Returns:
+        The output CSV path.
+
+    Raises:
+        ValueError: If csv_path is missing or worksheet is not found.
+        googleapiclient.errors.HttpError: For Sheets API errors.
+    """
     if csv_path and out_csv_path:
         raise ValueError("Provide only one of csv_path or out_csv_path.")
     if not csv_path:
@@ -151,9 +216,10 @@ def export_to_csv(
     if not csv_path:
         raise ValueError("Missing csv_path. Provide csv_path (preferred) or out_csv_path.")
 
-    cfg = AppConfig.load(config_path)
+    cfg = config or AppConfig.load(config_path)
 
-    clients = build_clients_from_config(cfg)
+    if clients is None:
+        clients = build_clients_from_config(cfg)
     ws_title = worksheet_title or _latest_timestamp_tab_title(clients, spreadsheet_id)
     df = read_sheet_to_dataframe(clients, spreadsheet_id, ws_title)
 
@@ -162,7 +228,12 @@ def export_to_csv(
 
     Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(csv_path, index=False)
-    print(f"Wrote: {csv_path}")
+    logging.getLogger(__name__).info(
+        "event=export_csv spreadsheet_id=%s worksheet=%s path=%s",
+        spreadsheet_id,
+        ws_title,
+        csv_path,
+    )
     return csv_path
 
 

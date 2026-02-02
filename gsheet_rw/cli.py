@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import fire
@@ -12,7 +13,7 @@ class SheetCLI:
         self,
         csv_path: str,
         sheet_title: Optional[str] = None,
-        config_path: str = "config.yaml",
+        config_path: str = "config/config.yaml",
         worksheet_title: Optional[str] = None,
         drive_folder_name: Optional[str] = None,
         share_role: str = "writer",
@@ -32,7 +33,7 @@ class SheetCLI:
         self,
         spreadsheet_id: str,
         csv_path: Optional[str] = None,
-        config_path: str = "config.yaml",
+        config_path: str = "config/config.yaml",
         worksheet_title: Optional[str] = None,
         out_csv_path: Optional[str] = None,
     ) -> str:
@@ -46,6 +47,10 @@ class SheetCLI:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     fire.Fire(SheetCLI)
 
 

@@ -32,7 +32,7 @@ Rationale for making OAuth the default:
 
 Key behavior:
 - If OAuth paths are omitted in config, defaults are inferred:
-  - Client secret: `credentials.json` or `client_secret.json` next to `config.yaml`
+  - Client secret: `credentials.json` or `client_secret.json` next to `config/config.yaml`
   - Token: OS-specific user config dir (`gsheet-rw/token.json`) unless overridden
 - First run shows a message and opens browser for consent.
 
@@ -118,7 +118,7 @@ Validation fails if any column is missing.
 
 A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 
-- File: `sheet_registry.yaml` (stored next to `config.yaml`)
+- File: `data/sheet_registry.yaml`
 - Keyed by **folder name** + **sheet title**
 - If ID no longer exists, a new sheet is created and registry updated.
 
@@ -130,8 +130,11 @@ A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 - **In-place updates** were chosen to preserve sharing; new data goes into a timestamp-named tab rather than creating a new file.
 - **Newest tab ordering**: each new timestamp tab is moved to the leftmost position for visibility.
 - **Secrets handling**: OAuth credentials and token moved into `./secrets/`, which is gitignored.
+- **Config location**: config files live in `config/` (`config/config.yaml`, `config/config.example.yaml`).
 - **Column header change**: `# Comp` renamed to `Competitor Count` across CSVs and code.
 - **UI-agnostic refactor**: core logic moved into `gsheet_rw/app.py` with a public API surface for future Flask/Tkinter UIs.
+- **Testability**: `create_from_csv`/`export_to_csv` accept optional injected clients (mockable) and an env-gated integration test was added.
+- **Logging**: `print` statements replaced with `logging`; CLI configures a default formatter for local runs.
 
 ------------------------------------------------------------------------
 
@@ -166,6 +169,7 @@ A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 - `gsheet_rw/config.py`: Config parsing + OAuth defaults
 - `gsheet_rw/registry.py`: Registry file helpers
 - `gsheet_rw/__init__.py`: Public API surface (`create_from_csv`, `export_to_csv`)
+- `tests/test_integration_sandbox.py`: Optional integration test (env-gated)
 
 ------------------------------------------------------------------------
 
@@ -173,11 +177,11 @@ A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 
 - Credentials moved to `./secrets/`
 - `secrets/` added to `.gitignore`
-- `config.yaml` updated to point at `./secrets/credentials.json` and `./secrets/token.json`
+- `config/config.yaml` updated to point at `./secrets/credentials.json` and `./secrets/token.json`
 
 ------------------------------------------------------------------------
 
-# Current config.example.yaml
+# Current config/config.example.yaml
 
 - Uses OAuth by default
 - Requires `drive_folder_name` (use `"root"` for My Drive root)
@@ -190,6 +194,8 @@ A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 - Drive folder lookup is by **human-readable name** and errors if duplicates are found.
 - Folder lookup will raise a PermissionError on 403 (expected in restricted scopes).
 - Network/auth operations must run outside sandbox.
+- Integration test runs only when `RUN_INTEGRATION_TESTS=1` and required env vars are set.
+- `AGENTS.md` now contains run instructions; this file contains session state/handoff details.
 
 ------------------------------------------------------------------------
 

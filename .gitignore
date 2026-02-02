@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 .env
-config.yaml
+config/config.yaml
 *.json
 out/
 secrets/

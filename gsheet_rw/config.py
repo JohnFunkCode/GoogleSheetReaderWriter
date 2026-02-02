@@ -35,7 +35,7 @@ class AppConfig:
 
         auth_mode = str(data.get("auth_mode", "service_account")).strip().lower()
         if auth_mode not in {"service_account", "oauth", "adc"}:
-            raise ValueError("config.yaml: auth_mode must be 'service_account', 'oauth', or 'adc'")
+            raise ValueError("config/config.yaml: auth_mode must be 'service_account', 'oauth', or 'adc'")
 
         missing = [k for k in ("owner_email", "share_emails") if k not in data]
         if missing:
