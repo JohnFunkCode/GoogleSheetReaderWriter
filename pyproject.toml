@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "GoogleSheetReaderWriter"
+version = "0.1.0"
+description = "Sample CLI tool to create and export Google Sheets for karate tournament collaboration."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = ["gsheet_rw"]
+
+[project.scripts]
+gsheet-rw = "gsheet_rw.cli:main"

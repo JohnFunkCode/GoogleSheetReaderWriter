@@ -1,0 +1,18 @@
+# Example config.yaml (current settings)
+# Recommended for personal Gmail: OAuth with local token storage.
+auth_mode: "oauth"
+oauth_client_secret_json: "./secrets/credentials.json"
+# oauth_token_path: "./secrets/token.json"
+
+# Required when creating a new sheet. Use "root" for My Drive root.
+drive_folder_name: "root"
+spreadsheet_title: "Tournament Judges Sheet"
+# Required on create only; the first tab will be renamed to a timestamp immediately.
+worksheet_title: "Initial"
+
+# Required. Used for column protection (owner can edit protected columns).
+owner_email: "you@example.com"
+share_emails:
+  - "judge1@example.com"
+  - "judge2@example.com"
+# The sheet title identifies the file in Drive.
