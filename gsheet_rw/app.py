@@ -7,6 +7,7 @@ import re
 from typing import Optional
 
 import pandas as pd
+from googleapiclient.errors import HttpError
 
 from .config import AppConfig
 from .registry import get_registered_id, load_registry, save_registry, set_registered_id
@@ -70,7 +71,7 @@ def create_from_csv(
         unprotected_last_n: Number of trailing columns to leave unprotected.
 
     Returns:
-        The spreadsheet ID of the created or updated file.
+        A human-readable message describing the created or updated spreadsheet.
 
     Raises:
         ValueError: If required config fields are missing or CSV columns are invalid.
@@ -177,7 +178,8 @@ def create_from_csv(
         timestamp_title,
         created_new,
     )
-    return spreadsheet_id
+    action = "Created" if created_new else "Updated"
+    return f"{action} spreadsheet '{spreadsheet_title}' (ID: {spreadsheet_id})"
 
 
 def export_to_csv(
@@ -203,7 +205,7 @@ def export_to_csv(
         out_csv_path: Deprecated alias for csv_path.
 
     Returns:
-        The output CSV path.
+        A human-readable message describing the completed export.
 
     Raises:
         ValueError: If csv_path is missing or worksheet is not found.
@@ -234,7 +236,10 @@ def export_to_csv(
         ws_title,
         csv_path,
     )
-    return csv_path
+    return (
+        f"Exported spreadsheet '{ws_title}' from spreadsheet ID {spreadsheet_id} "
+        f"to CSV file '{csv_path}'"
+    )
 
 
 def _validate_columns(df: pd.DataFrame) -> None:
@@ -267,10 +272,19 @@ def _latest_timestamp_tab_title(clients, spreadsheet_id: str) -> str:
 
 
 def _list_sheet_titles(clients, spreadsheet_id: str) -> list[str]:
-    meta = clients.sheets.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        fields="sheets(properties(title))",
-    ).execute()
+    try:
+        meta = clients.sheets.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title))",
+        ).execute()
+    except HttpError as e:
+        if getattr(e.resp, "status", None) == 404:
+            raise FileNotFoundError(
+                f"Spreadsheet '{spreadsheet_id}' was not found, or the OAuth account used by this app "
+                "does not have access to it. Verify the spreadsheet ID and make sure the signed-in "
+                "Google account can open the spreadsheet in the browser."
+            ) from e
+        raise
     return [s.get("properties", {}).get("title", "") for s in meta.get("sheets", [])]
 
 

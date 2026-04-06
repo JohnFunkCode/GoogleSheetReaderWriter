@@ -45,19 +45,24 @@ gcloud auth application-default login --scopes="https://www.googleapis.com/auth/
 
 ### OAuth setup (personal Gmail)
 
+Authentication setup guide:
+- [Guide to authentication setup](docs/guide-to-authentication.md)
+
 1. Google Cloud Console → APIs & Services → OAuth consent screen
    - User type: **External**
    - Add yourself as a test user (or publish, if needed)
 2. APIs & Services → Credentials → Create Credentials → **OAuth client ID**
    - Application type: **Desktop app**
-3. Download the OAuth client JSON as `credentials.json` next to `config/config.yaml`
-   (or set `oauth_client_secret_json` in `config/config.yaml`).
-4. Optional: set `oauth_token_path` in `config/config.yaml` (where the tool can write `token.json`).
+3. Download the OAuth client JSON as `../secrets/credentials.json` relative to `config/config.yaml`
+   (or set `oauth_client_secret_json` in `config/config.yaml`; relative paths are resolved from the config file directory).
+4. Optional: set `oauth_token_path` in `config/config.yaml`.
    If omitted, the default is:
    - macOS: `~/Library/Application Support/gsheet-rw/token.json`
    - Windows: `%APPDATA%\gsheet-rw\token.json`
    - Linux: `~/.config/gsheet-rw/token.json`
-5. First run will open a browser for consent; it will write/refresh `token.json` automatically.
+5. First run will open a browser for consent; the OAuth token is stored in the system keyring.
+6. If the token is not present in keyring, the app still checks `oauth_token_path` on disk and migrates that token into keyring after a successful load.
+7. If a cached token becomes stale or tied to an old OAuth client secret, the app falls back to browser re-auth automatically.
 
 ### Service account setup (Workspace / automation)
 
@@ -139,8 +144,8 @@ from gsheet_rw.config import AppConfig
 
 cfg = AppConfig(
     auth_mode="oauth",
-    oauth_client_secret_json=Path("./secrets/credentials.json"),
-    oauth_token_path=Path("./secrets/token.json"),
+    oauth_client_secret_json=Path("../secrets/credentials.json"),
+    oauth_token_path=Path("../secrets/token.json"),
     owner_email="you@example.com",
     share_emails=["judge1@example.com", "judge2@example.com"],
     drive_folder_name="root",
@@ -152,6 +157,18 @@ create_from_csv(
     csv_path="./data/test_data.csv",
     config=cfg,
 )
+```
+
+CLI output will be a message like:
+
+```text
+Created spreadsheet 'Karate Tournament - Ring Assignments' (ID: 123abc...)
+```
+
+or:
+
+```text
+Updated spreadsheet 'Karate Tournament - Ring Assignments' (ID: 123abc...)
 ```
 
 Notes:
@@ -173,6 +190,56 @@ gsheet-rw export_to_csv \
 ```
 
 If `worksheet_title` is omitted, the export uses the most recent timestamp-named tab.
+
+CLI output will be a message like:
+
+```text
+Exported spreadsheet '2026-04-05 10:15:00' from spreadsheet ID 123abc... to CSV file './out/export.csv'
+```
+
+### Clear cached OAuth token
+
+Remove the cached OAuth token from keyring:
+
+```bash
+gsheet-rw clear_oauth_token \
+  --config_path "./config/config.yaml"
+```
+
+If you want a full reset that also removes the filesystem fallback token, use:
+
+```bash
+gsheet-rw clear_oauth_token \
+  --config_path "./config/config.yaml" \
+  --clear_filesystem_fallback true
+```
+
+Notes:
+- The keyring entry is keyed by the resolved `oauth_token_path`.
+- Clearing only keyring is usually enough for inspection and debugging.
+- If `oauth_token_path` still exists on disk, the app will load it and migrate it back into keyring on the next run.
+
+### Show authentication status
+
+Show the resolved authentication configuration and token storage state:
+
+```bash
+gsheet-rw auth_status \
+  --config_path "./config/config.yaml"
+```
+
+This is useful for confirming:
+
+- which auth mode is active
+- where `credentials.json` resolves to
+- where the token fallback path resolves to
+- whether a token currently exists in keyring
+- whether a fallback token file exists on disk
+
+## Security Notes
+
+- OAuth tokens are stored in keyring first. If keyring is unavailable, the app can still fall back to `oauth_token_path` on disk for compatibility and debugging. In this project that tradeoff is intentional, but the fallback file may be less protected than the OS keyring depending on the local machine and filesystem permissions.
+- The app logs useful operational details at `INFO` level, including spreadsheet IDs, worksheet names, folder names, and sharing target email addresses. That is acceptable for the intended trusted-user utility/tutorial use case, but those logs should be treated as sensitive metadata if used in a shared environment.
 
 ## Column protection behavior
 

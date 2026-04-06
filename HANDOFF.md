@@ -34,6 +34,11 @@ Key behavior:
 - If OAuth paths are omitted in config, defaults are inferred:
   - Client secret: `credentials.json` or `client_secret.json` next to `config/config.yaml`
   - Token: OS-specific user config dir (`gsheet-rw/token.json`) unless overridden
+- If OAuth or service account paths are provided as relative paths, they are resolved from the config file directory.
+- OAuth tokens are stored in system keyring first, using the resolved `oauth_token_path` as the lookup key.
+- If keyring has no token, the app falls back to `oauth_token_path` on disk and migrates that token into keyring.
+- If token refresh fails, the app falls back to interactive browser re-auth instead of aborting.
+- A debug CLI command can clear the cached token from keyring, with an option to also remove the filesystem fallback token.
 - First run shows a message and opens browser for consent.
 
 ------------------------------------------------------------------------
@@ -72,7 +77,8 @@ Behavior (current):
 9. Move the new timestamp tab to **leftmost** position.
 10. Share file with configured users.
 
-Prints either `Created spreadsheet: <id>` or `Updated spreadsheet: <id>`.
+Prints a message like `Created spreadsheet 'Tournament Judges Sheet' (ID: <id>)`
+or `Updated spreadsheet 'Tournament Judges Sheet' (ID: <id>)`.
 
 ## export_to_csv
 Args:
@@ -86,6 +92,29 @@ Behavior:
 2. Read from provided worksheet title or the **latest timestamp tab**.
 3. Normalize expected column ordering.
 4. Save to CSV.
+
+Prints a message like:
+`Exported spreadsheet '2026-04-05 10:15:00' from spreadsheet ID <id> to CSV file './out/export.csv'`.
+
+## clear_oauth_token
+Args:
+- `config_path`
+- `clear_filesystem_fallback` (default: false)
+
+Behavior:
+1. Load config.
+2. Resolve the OAuth token key from `oauth_token_path`.
+3. Remove the cached token from keyring.
+4. Optionally delete the filesystem fallback token file.
+
+## auth_status
+Args:
+- `config_path`
+
+Behavior:
+1. Load config.
+2. Resolve the effective auth paths for the current auth mode.
+3. For OAuth mode, report whether keyring has a token and whether the fallback token file exists.
 
 ------------------------------------------------------------------------
 
@@ -169,6 +198,7 @@ A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 - `gsheet_rw/config.py`: Config parsing + OAuth defaults
 - `gsheet_rw/registry.py`: Registry file helpers
 - `gsheet_rw/__init__.py`: Public API surface (`create_from_csv`, `export_to_csv`)
+- `docs/guide-to-authentication.md`: Plain-language guide to authentication setup, token storage, and permissions
 - `tests/test_integration_sandbox.py`: Optional integration test (env-gated)
 
 ------------------------------------------------------------------------
@@ -177,7 +207,8 @@ A registry file tracks the sheet ID by `(folder_name, sheet_title)`:
 
 - Credentials moved to `./secrets/`
 - `secrets/` added to `.gitignore`
-- `config/config.yaml` updated to point at `./secrets/credentials.json` and `./secrets/token.json`
+- `config/config.yaml` updated to point at `../secrets/credentials.json` and `../secrets/token.json`
+- OAuth token cache is keyring-first, with filesystem fallback for migration/debugging
 
 ------------------------------------------------------------------------
 

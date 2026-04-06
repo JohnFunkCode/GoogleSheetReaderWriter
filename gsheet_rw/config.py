@@ -31,6 +31,7 @@ class AppConfig:
     @staticmethod
     def load(path: str | Path) -> "AppConfig":
         p = Path(path).expanduser().resolve()
+        base_dir = p.parent
         data: Dict[str, Any] = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
 
         auth_mode = str(data.get("auth_mode", "service_account")).strip().lower()
@@ -52,13 +53,15 @@ class AppConfig:
             sa = str(data.get("service_account_json", "")).strip()
             if not sa:
                 raise ValueError("Missing required config key for service_account mode: service_account_json")
-            service_account_json = Path(sa).expanduser().resolve()
+            service_account_json = _resolve_configured_path(sa, base_dir)
 
         if auth_mode == "oauth":
             cs = str(data.get("oauth_client_secret_json", "")).strip()
             tp = str(data.get("oauth_token_path", "")).strip()
-            oauth_client_secret_json = _default_oauth_client_secret_path(p) if not cs else Path(cs).expanduser().resolve()
-            oauth_token_path = _default_oauth_token_path() if not tp else Path(tp).expanduser().resolve()
+            oauth_client_secret_json = (
+                _default_oauth_client_secret_path(p) if not cs else _resolve_configured_path(cs, base_dir)
+            )
+            oauth_token_path = _default_oauth_token_path() if not tp else _resolve_configured_path(tp, base_dir)
 
         drive_folder_id = str(data.get("drive_folder_id") or "").strip() or None
         drive_folder_name = str(data.get("drive_folder_name") or "").strip() or None
@@ -86,6 +89,13 @@ def _default_oauth_client_secret_path(config_path: Path) -> Path:
         if candidate.exists():
             return candidate.resolve()
     return (base / "credentials.json").resolve()
+
+
+def _resolve_configured_path(value: str, base_dir: Path) -> Path:
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    return candidate.resolve()
 
 
 def _default_oauth_token_path() -> Path:

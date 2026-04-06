@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 import google.auth
+import keyring
 import pandas as pd
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials as UserCredentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from keyring.errors import KeyringError, PasswordDeleteError
 
 from .config import AppConfig
 
@@ -20,6 +24,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+KEYRING_SERVICE_NAME = "gsheet-rw"
 
 
 @dataclass
@@ -31,6 +36,173 @@ class GoogleClients:
 class GoogleClientsProtocol(Protocol):
     sheets: Any
     drive: Any
+
+
+def _oauth_token_key(token_path: Path) -> str:
+    return str(token_path)
+
+
+def _escape_drive_query_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _oauth_principal(creds: Optional[UserCredentials]) -> str:
+    account = getattr(creds, "account", "") if creds else ""
+    return account or "(unknown_oauth_user)"
+
+
+def _load_oauth_client_id(client_secret_path: Path) -> Optional[str]:
+    try:
+        payload = json.loads(client_secret_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+    for section_name in ("installed", "web"):
+        section = payload.get(section_name)
+        if isinstance(section, dict):
+            client_id = str(section.get("client_id") or "").strip()
+            if client_id:
+                return client_id
+    return None
+
+
+def clear_cached_oauth_token(
+    cfg: AppConfig,
+    *,
+    clear_filesystem_fallback: bool = False,
+) -> Dict[str, bool]:
+    if (cfg.auth_mode or "service_account").strip().lower() != "oauth":
+        raise ValueError("clear_cached_oauth_token requires auth_mode='oauth'")
+    if not cfg.oauth_token_path:
+        raise ValueError("oauth_token_path is required for oauth mode")
+
+    logger = logging.getLogger(__name__)
+    token_path = Path(cfg.oauth_token_path).expanduser().resolve()
+    deleted_keyring = False
+    deleted_filesystem = False
+
+    try:
+        keyring.delete_password(KEYRING_SERVICE_NAME, _oauth_token_key(token_path))
+        deleted_keyring = True
+        logger.info("oauth_token_deleted=keyring path=%s", token_path)
+    except PasswordDeleteError:
+        logger.info("oauth_token_deleted=keyring path=%s skipped=not_found", token_path)
+    except KeyringError as exc:
+        logger.warning("oauth_token_keyring_delete_failed=true path=%s error=%s", token_path, exc)
+
+    if clear_filesystem_fallback and token_path.exists():
+        token_path.unlink()
+        deleted_filesystem = True
+        logger.info("oauth_token_deleted=filesystem path=%s", token_path)
+
+    return {
+        "keyring_deleted": deleted_keyring,
+        "filesystem_deleted": deleted_filesystem,
+    }
+
+
+def get_auth_status(cfg: AppConfig) -> Dict[str, Any]:
+    mode = (cfg.auth_mode or "service_account").strip().lower()
+    status: Dict[str, Any] = {
+        "auth_mode": mode,
+    }
+
+    if mode == "oauth":
+        client_secret_path = Path(cfg.oauth_client_secret_json).expanduser().resolve() if cfg.oauth_client_secret_json else None
+        token_path = Path(cfg.oauth_token_path).expanduser().resolve() if cfg.oauth_token_path else None
+        keyring_has_token = False
+        keyring_error = None
+
+        if token_path is not None:
+            try:
+                keyring_has_token = keyring.get_password(
+                    KEYRING_SERVICE_NAME,
+                    _oauth_token_key(token_path),
+                ) is not None
+            except KeyringError as exc:
+                keyring_error = str(exc)
+
+        status.update(
+            {
+                "oauth_client_secret_path": str(client_secret_path) if client_secret_path else None,
+                "oauth_client_secret_exists": client_secret_path.exists() if client_secret_path else False,
+                "oauth_token_path": str(token_path) if token_path else None,
+                "oauth_token_file_exists": token_path.exists() if token_path else False,
+                "keyring_service": KEYRING_SERVICE_NAME,
+                "keyring_has_token": keyring_has_token,
+            }
+        )
+        if keyring_error:
+            status["keyring_error"] = keyring_error
+        return status
+
+    if mode == "service_account":
+        service_account_path = Path(cfg.service_account_json).expanduser().resolve() if cfg.service_account_json else None
+        status.update(
+            {
+                "service_account_json_path": str(service_account_path) if service_account_path else None,
+                "service_account_json_exists": service_account_path.exists() if service_account_path else False,
+            }
+        )
+        return status
+
+    status["adc_uses_application_default_credentials"] = True
+    return status
+
+
+def _store_oauth_credentials(
+    creds: UserCredentials,
+    token_path: Path,
+    *,
+    write_filesystem: bool = False,
+) -> None:
+    logger = logging.getLogger(__name__)
+    token_json = creds.to_json()
+
+    try:
+        keyring.set_password(KEYRING_SERVICE_NAME, _oauth_token_key(token_path), token_json)
+        logger.info("oauth_token_persisted=keyring path=%s", token_path)
+    except KeyringError as exc:
+        logger.warning("oauth_token_keyring_write_failed=true path=%s error=%s", token_path, exc)
+        write_filesystem = True
+
+    if write_filesystem:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token_json, encoding="utf-8")
+        logger.info("oauth_token_persisted=filesystem path=%s", token_path)
+
+
+def _load_oauth_credentials(token_path: Path) -> Optional[UserCredentials]:
+    logger = logging.getLogger(__name__)
+
+    try:
+        token_json = keyring.get_password(KEYRING_SERVICE_NAME, _oauth_token_key(token_path))
+    except KeyringError as exc:
+        logger.warning("oauth_token_keyring_read_failed=true path=%s error=%s", token_path, exc)
+        token_json = None
+
+    if token_json:
+        try:
+            token_info = json.loads(token_json)
+            logger.info("oauth_token_source=keyring path=%s", token_path)
+            return UserCredentials.from_authorized_user_info(token_info, SCOPES)
+        except (TypeError, ValueError) as exc:
+            logger.warning("oauth_token_keyring_invalid=true path=%s error=%s", token_path, exc)
+
+    if token_path.exists():
+        try:
+            logger.info("oauth_token_source=filesystem path=%s", token_path)
+            creds = UserCredentials.from_authorized_user_file(str(token_path), SCOPES)
+            _store_oauth_credentials(creds, token_path, write_filesystem=False)
+            return creds
+        except ValueError as exc:
+            logger.warning(
+                "oauth_token_filesystem_invalid=true path=%s error=%s action=browser_reauth",
+                token_path,
+                exc,
+            )
+
+    return None
 
 
 def build_clients(service_account_json_path: str) -> GoogleClients:
@@ -70,31 +242,59 @@ def build_clients_from_config(cfg: AppConfig) -> GoogleClients:
 
     if not cfg.oauth_client_secret_json.exists():
         raise FileNotFoundError(
-            "OAuth client secret JSON not found. "
-            "Provide oauth_client_secret_json in config/config.yaml or place credentials.json next to the config file."
+            f"OAuth client secret JSON not found at {cfg.oauth_client_secret_json}. "
+            "Set oauth_client_secret_json in config/config.yaml. "
+            "Relative paths in config are resolved from the config file directory."
         )
 
     token_path = Path(cfg.oauth_token_path).expanduser().resolve()
-    creds: Optional[UserCredentials] = None
+    creds = _load_oauth_credentials(token_path)
+    expected_client_id = _load_oauth_client_id(cfg.oauth_client_secret_json)
 
-    if token_path.exists():
-        creds = UserCredentials.from_authorized_user_file(str(token_path), SCOPES)
+    if creds and expected_client_id:
+        cached_client_id = str(getattr(creds, "client_id", "") or "").strip()
+        if cached_client_id and cached_client_id != expected_client_id:
+            logging.getLogger(__name__).warning(
+                "oauth_token_client_mismatch=true path=%s action=browser_reauth "
+                "message=\"cached token was created for a different OAuth client\"",
+                token_path,
+            )
+            creds = None
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+            _store_oauth_credentials(creds, token_path)
+        except RefreshError as exc:
+            logging.getLogger(__name__).warning(
+                "oauth_token_refresh_failed=true path=%s error=%s action=browser_reauth "
+                "message=\"cached token could not be refreshed; sign in again\"",
+                token_path,
+                exc,
+            )
+            creds = None
 
     if not creds or not creds.valid:
         logger = logging.getLogger(__name__)
-        if token_path.exists():
-            logger.info("oauth_reauth_required=true message=\"browser window will open\"")
+        if creds:
+            logger.info(
+                "oauth_reauth_required=true path=%s message=\"browser window will open for Google sign-in\"",
+                token_path,
+            )
         else:
-            logger.info("oauth_first_run=true message=\"browser window will open\"")
+            logger.info(
+                "oauth_signin_required=true path=%s message=\"browser window will open for Google sign-in\"",
+                token_path,
+            )
         flow = InstalledAppFlow.from_client_secrets_file(str(cfg.oauth_client_secret_json), SCOPES)
         creds = flow.run_local_server(port=0)
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(creds.to_json(), encoding="utf-8")
+        _store_oauth_credentials(creds, token_path)
 
-    logging.getLogger(__name__).info("auth_mode=oauth principal=local_user_token")
+    logging.getLogger(__name__).info(
+        "auth_mode=oauth principal=%s token_path=%s",
+        _oauth_principal(creds),
+        token_path,
+    )
     sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
     drive = build("drive", "v3", credentials=creds, cache_discovery=False)
     return GoogleClients(sheets=sheets, drive=drive)
@@ -250,11 +450,12 @@ def spreadsheet_exists(clients: GoogleClients, spreadsheet_id: str) -> bool:
 
 
 def resolve_drive_folder_id_by_name(clients: GoogleClients, folder_name: str) -> str:
+    escaped_folder_name = _escape_drive_query_literal(folder_name)
     try:
         resp = clients.drive.files().list(
             q=(
                 "mimeType='application/vnd.google-apps.folder' "
-                f"and name='{folder_name}' and trashed=false"
+                f"and name='{escaped_folder_name}' and trashed=false"
             ),
             fields="files(id,name)",
             includeItemsFromAllDrives=True,
@@ -594,10 +795,18 @@ def read_sheet_to_dataframe(
     spreadsheet_id: str,
     worksheet_title: str,
 ) -> pd.DataFrame:
-    resp = clients.sheets.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range=f"{worksheet_title}",
-    ).execute()
+    try:
+        resp = clients.sheets.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"{worksheet_title}",
+        ).execute()
+    except HttpError as e:
+        if getattr(e.resp, "status", None) == 404:
+            raise FileNotFoundError(
+                f"Spreadsheet '{spreadsheet_id}' or worksheet '{worksheet_title}' was not found, "
+                "or the OAuth account used by this app does not have access to it."
+            ) from e
+        raise
     values = resp.get("values", [])
     if not values:
         return pd.DataFrame()
@@ -611,10 +820,18 @@ def read_sheet_to_dataframe(
 
 
 def _get_sheet_id(clients: GoogleClients, spreadsheet_id: str, worksheet_title: str) -> int:
-    meta = clients.sheets.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        fields="sheets(properties(sheetId,title))",
-    ).execute()
+    try:
+        meta = clients.sheets.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        ).execute()
+    except HttpError as e:
+        if getattr(e.resp, "status", None) == 404:
+            raise FileNotFoundError(
+                f"Spreadsheet '{spreadsheet_id}' was not found, or the OAuth account used by this app "
+                "does not have access to it."
+            ) from e
+        raise
     for s in meta.get("sheets", []):
         props = s.get("properties", {})
         if props.get("title") == worksheet_title:
